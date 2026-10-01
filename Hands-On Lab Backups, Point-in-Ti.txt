@@ -1,0 +1,161 @@
+# Hands-On Lab: Backups, Point-in-Time Recovery, and Replication
+
+## Objective
+
+The objective of this lab was to protect the `bootcamp` PostgreSQL database using logical backups, WAL archiving, point-in-time recovery (PITR), and streaming replication.
+
+---
+
+## Step 1: Take and Verify a Logical Backup
+
+First, I created a backup directory and created a custom-format logical backup of the `bootcamp` database.
+
+```shell
+mkdir -p ~/backups
+pg_dump -Fc -f ~/backups/bootcamp.dump bootcamp
+```
+
+I verified the backup contents using:
+
+```shell
+pg_restore --list ~/backups/bootcamp.dump | head
+```
+
+I then created a test database and restored the backup into it:
+
+```shell
+createdb bootcamp_check
+pg_restore -d bootcamp_check ~/backups/bootcamp.dump
+```
+
+The restore completed successfully, confirming that the logical backup was usable.
+
+---
+
+## Step 2: Enable WAL Archiving
+
+I created a directory for archived WAL files:
+
+```shell
+mkdir -p ~/backups/wal
+```
+
+I configured PostgreSQL in `postgresql.conf` as follows:
+
+```conf
+wal_level = replica
+archive_mode = on
+archive_command = 'cp %p /home/$USER/backups/wal/%f'
+```
+
+I restarted PostgreSQL to apply the configuration:
+
+```shell
+sudo systemctl restart postgresql
+```
+
+I then created a base backup using:
+
+```shell
+pg_basebackup -D ~/backups/base -Ft -z -Xs -P
+```
+
+The base backup completed successfully.
+
+---
+
+## Step 3: Simulate a Disaster and Perform PITR
+
+I recorded the current database time before making the simulated mistake:
+
+```sql
+SELECT now();
+```
+
+Example:
+
+```text
+2025-06-01 10:00:00
+```
+
+I then simulated accidental data deletion:
+
+```sql
+DELETE FROM students;
+```
+
+To recover the database, PostgreSQL was stopped and the data directory was replaced with the base backup.
+
+The recovery configuration was set to:
+
+```conf
+restore_command = 'cp ~/backups/wal/%f %p'
+recovery_target_time = '2025-06-01 10:00:00'
+```
+
+PostgreSQL was then started so that it could replay the archived WAL files until the specified recovery target.
+
+After recovery, I verified the `students` table:
+
+```sql
+SELECT count(*) FROM students;
+```
+
+The original student records were restored, confirming that point-in-time recovery was successful.
+
+---
+
+## Step 4: Set Up a Streaming Standby
+
+On the primary server, I created a replication user:
+
+```sql
+CREATE ROLE replicator
+WITH REPLICATION LOGIN PASSWORD 'reppass';
+```
+
+I configured `pg_hba.conf` to allow the replication connection:
+
+```conf
+host replication replicator 127.0.0.1/32 md5
+```
+
+I then created the standby using:
+
+```shell
+pg_basebackup -h 127.0.0.1 -U replicator -D ~/standby -R -P
+```
+
+The `-R` option automatically creates the required standby configuration so the new server can connect to the primary and stream WAL changes.
+
+---
+
+## Step 5: Monitor Replication Health
+
+I checked the replication status from the primary server using:
+
+```sql
+SELECT application_name, state,
+       pg_wal_lsn_diff(sent_lsn, replay_lsn) AS lag_bytes
+FROM pg_stat_replication;
+```
+
+The query was used to confirm that the standby was connected and streaming WAL from the primary.
+
+The `state` column indicates the replication state, while `lag_bytes` shows the difference between the WAL sent by the primary and the WAL replayed by the standby.
+
+---
+
+## Conclusion
+
+The lab successfully demonstrated PostgreSQL backup and disaster-recovery techniques.
+
+I:
+
+1. Created and verified a logical backup using `pg_dump` and `pg_restore`.
+2. Enabled WAL archiving and created a base backup using `pg_basebackup`.
+3. Simulated accidental data deletion and recovered the database using Point-in-Time Recovery.
+4. Created a replication user and configured a streaming standby.
+5. Monitored the replication status and WAL lag using `pg_stat_replication`.
+
+These techniques provide protection against accidental data loss, system failures, and other database disasters while supporting reliable recovery and high availability.
